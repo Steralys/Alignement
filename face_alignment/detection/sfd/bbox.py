@@ -1,6 +1,5 @@
-import math
 import numpy as np
-
+import torch
 
 def nms(dets, thresh):
     if 0 == len(dets):
@@ -68,4 +67,28 @@ def decode(loc, priors, variances):
         priors[:, 2:] * np.exp(loc[:, 2:] * variances[1])), 1)
     boxes[:, :2] -= boxes[:, 2:] / 2
     boxes[:, 2:] += boxes[:, :2]
+    return boxes
+
+
+def tdecode(loc: torch.Tensor, priors: torch.Tensor) -> torch.Tensor:
+    """Decode bounding boxes from predictions using prior boxes and variances.
+
+    Args:
+        loc (Tensor): location predictions, shape: [num_priors, 4]
+        priors (Tensor): prior boxes in center-offset form, shape: [num_priors, 4]
+        variances (list[float]): variances for adjusting scale
+
+    Returns:
+        Tensor: decoded bounding boxes, shape: [num_priors, 4] in (xmin, ymin, xmax, ymax)
+    """
+
+    # Center point and width-height decoding
+    boxes = torch.cat((
+        priors[:, :2] + loc[:, :2] * 0.1 * priors[:, 2:],  # cx, cy
+        priors[:, 2:] * torch.exp(loc[:, 2:] * 0.2)        # w, h
+    ), dim=1)
+
+    # Convert from (cx, cy, w, h) to (xmin, ymin, xmax, ymax)
+    boxes[:, :2] -= boxes[:, 2:] / 2  # xmin, ymin
+    boxes[:, 2:] += boxes[:, :2]      # xmax, ymax
     return boxes

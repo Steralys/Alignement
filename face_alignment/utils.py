@@ -16,6 +16,21 @@ try:
 except BaseException:
     from torch.hub import _get_torch_home as get_dir
 
+import time
+from functools import wraps
+from tqdm import tqdm
+
+def mesure_temps(func):
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        debut = time.time()
+        result = func(*args, **kwargs)
+        fin = time.time()
+        duree = fin - debut
+        tqdm.write(f"{func.__name__} éxecutée en {duree:.4f} secondes")
+        return result
+    return wrapper
+
 gauss_kernel = None
 
 
@@ -122,30 +137,24 @@ def crop(image, center, scale, resolution=256.0):
     """ Crops the image around the center. Input is expected to be an np.ndarray """
     ul = transform([1, 1], center, scale, resolution, True)
     br = transform([resolution, resolution], center, scale, resolution, True)
-    # pad = math.ceil(torch.norm((ul - br).float()) / 2.0 - (br[0] - ul[0]) / 2.0)
-    if image.ndim > 2:
-        newDim = np.array([br[1] - ul[1], br[0] - ul[0],
-                           image.shape[2]], dtype=np.int32)
-        newImg = np.zeros(newDim, dtype=np.uint8)
-    else:
-        newDim = np.array([br[1] - ul[1], br[0] - ul[0]], dtype=np.int)
-        newImg = np.zeros(newDim, dtype=np.uint8)
+    newDim = np.array([br[1] - ul[1], br[0] - ul[0], image.shape[2]], dtype=np.int32)
+    newImg = np.zeros(newDim, dtype=np.uint8)
     ht = image.shape[0]
     wd = image.shape[1]
     newX = np.array(
-        [max(1, -ul[0] + 1), min(br[0], wd) - ul[0]], dtype=np.int32)
+        [max(1, -ul[0] + 1), min(br[0], wd) - ul[0]], dtype=np.int32) #type: ignore
     newY = np.array(
-        [max(1, -ul[1] + 1), min(br[1], ht) - ul[1]], dtype=np.int32)
-    oldX = np.array([max(1, ul[0] + 1), min(br[0], wd)], dtype=np.int32)
-    oldY = np.array([max(1, ul[1] + 1), min(br[1], ht)], dtype=np.int32)
+        [max(1, -ul[1] + 1), min(br[1], ht) - ul[1]], dtype=np.int32) #type: ignore
+    oldX = np.array([max(1, ul[0] + 1), min(br[0], wd)], dtype=np.int32) #type: ignore
+    oldY = np.array([max(1, ul[1] + 1), min(br[1], ht)], dtype=np.int32) #type: ignore
     newImg[newY[0] - 1:newY[1], newX[0] - 1:newX[1]
            ] = image[oldY[0] - 1:oldY[1], oldX[0] - 1:oldX[1], :]
     newImg = cv2.resize(newImg, dsize=(int(resolution), int(resolution)),
                         interpolation=cv2.INTER_LINEAR)
     return newImg
 
-
-@jit(nopython=True)
+# @mesure_temps
+# @jit(nopython=True)
 def transform_np(point, center, scale, resolution, invert=False):
     """Generate and affine transformation matrix.
 
@@ -181,7 +190,7 @@ def transform_np(point, center, scale, resolution, invert=False):
 
     return new_point.astype(np.int32)
 
-
+# @mesure_temps
 def get_preds_fromhm(hm, center=None, scale=None):
     """Obtain (x,y) coordinates given a set of N heatmaps. If the center
     and the scale is provided the function will return the points also in
@@ -202,8 +211,7 @@ def get_preds_fromhm(hm, center=None, scale=None):
 
     return preds, preds_orig, scores
 
-
-@jit(nopython=True)
+# @jit(nopython=True)
 def _get_preds_fromhm(hm, idx, center=None, scale=None):
     """Obtain (x,y) coordinates given a set of N heatmaps and the
     coresponding locations of the maximums. If the center

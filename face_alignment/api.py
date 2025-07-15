@@ -1,14 +1,10 @@
 import torch
-import warnings
 from enum import IntEnum
 import numpy as np
 from tqdm import tqdm
-import time
 from .utils import *
-from .folder_data import FolderData
 from face_alignment.detection.retina.pytorch_retinaface import Pytorch_RetinaFace
 
-from collections.abc import Sequence
 
 class LandmarksType(IntEnum):
     """Enum class defining the type of landmarks to detect.
@@ -49,17 +45,31 @@ models_urls = {
     },
 }
 
+def fill_none_with_precedent(boxes, n):
+    filled = []
+    last_valid = None
+    none_count = 0
+    for i, box in enumerate(boxes):
+        if box is not None:
+            filled.append(box)
+            last_valid = box
+            none_count = 0
+        else:
+            none_count += 1
+            if last_valid is not None and none_count <= n:
+                filled.append(last_valid)
+            else:
+                raise RuntimeError(f"More than {n} consecutive None values at index {i}")
+    return filled
 
 class FaceAlignment:
-    def __init__(self, landmarks_type, network_size=NetworkSize.LARGE,
-                 device='cuda', dtype=torch.float32, flip_input=False, face_detector='sfd', face_detector_kwargs=None, verbose=False):
+    def __init__(self, device='cuda', dtype=torch.float32, flip_input=False, face_detector='retina', face_detector_kwargs=None, verbose=False):
         self.device = device
         self.flip_input = flip_input
-        self.landmarks_type = landmarks_type
         self.verbose = verbose
         self.dtype = dtype
 
-        network_size = int(network_size)
+        network_size = 4
         pytorch_version = torch.__version__
         if 'dev' in pytorch_version:
             pytorch_version = pytorch_version.rsplit('.', 2)[0]
@@ -283,8 +293,6 @@ class FaceAlignment:
 
 
 
-
-
     @torch.no_grad()
     def fast_get_landmarks_from_batch(self, image_batch: torch.Tensor):
         """Biggest face in each frame"""
@@ -314,7 +322,7 @@ class FaceAlignment:
         return landmarks, detected_faces
 
     @torch.no_grad()
-    def fast_get_landmarks_from_image(self, image_or_path: torch.Tensor, bbox: np.ndarray, return_landmark_score=False):
+    def fast_get_landmarks_from_image(self, image_or_path: torch.Tensor, bbox: list[int], return_landmark_score=False):
         """Predict the landmarks for each face present in the image.
 
         This function predicts a set of 68 2D or 3D images, one for each image present.
@@ -405,8 +413,9 @@ class FaceAlignment:
         """
         Crops faces and pad negative coordinates, interpolates to 512x512
         Returns:
-            - cropped: torch.Tensor of shape (N, 3, 512, 512)
-            - frames_padding: list of tuples (pad_left, pad_right, pad_top, pad_bottom)
+            tuple:
+                - cropped: torch.Tensor of shape (N, 3, 512, 512)
+                - frames_padding: list of tuples (pad_left, pad_right, pad_top, pad_bottom)
         """
         assert len(bbox_batch) == len(image_batch)
         frames: list[torch.Tensor] = []
@@ -453,3 +462,25 @@ class FaceAlignment:
             frames_padding.append((pad_left, pad_right, pad_top, pad_bottom))
         
         return torch.cat(frames, dim=0), frames_padding
+
+    def __call__(self, video: torch.Tensor):
+        """
+        Args:
+            - video: TCHW uint8 Tensor
+        Returns:
+            tuple:
+            - landmarks: list[ NDArray(68, 2) ]
+            - cropped_frames: torch.Tensor of shape (N, 3, 512, 512)
+            - boxes: bboxs list[ (x1, y1, x2, y2) ]
+            - frames_padding: list[ (pad_left, pad_right, pad_top, pad_bottom) ]
+        """
+        start = time.time()
+
+        landmarks, boxes = self.fast_get_landmarks_from_batch(video) # List[ NDArray(68, 2) ], List[ List[ int ] ]
+        boxes = fill_none_with_precedent(boxes, n=2) # !!! Temporaire: Replace up to 2 consecutive None values
+        boxes = self.box_rescale(boxes)
+        cropped_frames, frames_padding = self.crop_pad_interpolate(boxes, video)
+
+        tqdm.write(f"TOTAL DETECTION TIME: {time.time() - start:.4f}")
+
+        return landmarks, cropped_frames, boxes, frames_padding

@@ -1,1 +1,0 @@
-C:\venv\TorchStandard\Scripts\activate

@@ -101,4 +101,4 @@ ENV/
 .mypy_cache/
 
 *.json
-./activate_env.bat
+activate_env.bat

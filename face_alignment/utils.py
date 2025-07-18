@@ -1,13 +1,7 @@
-import os
-import sys
-import errno
 import torch
-import math
+import os, sys, errno
 import numpy as np
-import cv2
-from skimage import io
-from skimage import color
-from numba import jit
+# import cv2
 
 from urllib.parse import urlparse
 from torch.hub import download_url_to_file, HASH_REGEX
@@ -31,94 +25,153 @@ def mesure_temps(func):
         return result
     return wrapper
 
-gauss_kernel = None
+def crop_with_centers_scales(frames, centers, scales, out_size):
+    """
+    frames: (N, 3, H, W)
+    centers: (N, 2) in (x, y) format (absolute coords)
+    scales: (N,) where 1.0 means "reference crop"
+    out_size: (H_out, W_out)
+
+    Returns:
+        cropped: (N, 3, H_out, W_out)
+        crop_info: dict with keys:
+            - 'x1y1': (N, 2) tensor of top-left coords (float)
+            - 'size': (N, 2) tensor of crop size in pixels (w, h)
+    """
+    N, C, H, W = frames.shape
+    device = frames.device
+
+    # Compute crop size in original image space
+    scale = scales.view(-1, 1)  # (N, 1)
+    crop_w = scale[:, 0] * out_size[1]
+    crop_h = scale[:, 0] * out_size[0]
+
+    # Normalize center and scale for grid_sample
+    center_x = (centers[:, 0] / (W - 1)) * 2 - 1  # (N,)
+    center_y = (centers[:, 1] / (H - 1)) * 2 - 1
+    scale_x = (crop_w / (W - 1))                  # (N,)
+    scale_y = (crop_h / (H - 1))
+
+    # Create normalized grid
+    grid_y, grid_x = torch.meshgrid(
+        torch.linspace(-1, 1, out_size[0], device=device),
+        torch.linspace(-1, 1, out_size[1], device=device),
+        indexing='ij'
+    )
+    base_grid = torch.stack((grid_x, grid_y), dim=-1)[None].repeat(N, 1, 1, 1)  # (N, H_out, W_out, 2)
+
+    grid = base_grid.clone()
+    grid[..., 0] = grid[..., 0] * scale_x[:, None, None] + center_x[:, None, None]
+    grid[..., 1] = grid[..., 1] * scale_y[:, None, None] + center_y[:, None, None]
+
+    cropped = torch.nn.functional.grid_sample(frames, grid, mode='bilinear', align_corners=True)
+    return cropped
 
 
-def _gaussian(
-        size=3, sigma=0.25, amplitude=1, normalize=False, width=None,
-        height=None, sigma_horz=None, sigma_vert=None, mean_horz=0.5,
-        mean_vert=0.5):
-    # handle some defaults
-    if width is None:
-        width = size
-    if height is None:
-        height = size
-    if sigma_horz is None:
-        sigma_horz = sigma
-    if sigma_vert is None:
-        sigma_vert = sigma
-    center_x = mean_horz * width + 0.5
-    center_y = mean_vert * height + 0.5
-    gauss = np.empty((height, width), dtype=np.float32)
-    # generate kernel
-    for i in range(height):
-        for j in range(width):
-            gauss[i][j] = amplitude * math.exp(-(math.pow((j + 1 - center_x) / (
-                sigma_horz * width), 2) / 2.0 + math.pow((i + 1 - center_y) / (sigma_vert * height), 2) / 2.0))
-    if normalize:
-        gauss = gauss / np.sum(gauss)
-    return gauss
-
-
-def draw_gaussian(image, point, sigma):
-    global gauss_kernel
-    # Check if the gaussian is inside
-    ul = [math.floor(point[0] - 3 * sigma), math.floor(point[1] - 3 * sigma)]
-    br = [math.floor(point[0] + 3 * sigma), math.floor(point[1] + 3 * sigma)]
-    if (ul[0] > image.shape[1] or ul[1] > image.shape[0] or br[0] < 1 or br[1] < 1):
-        return image
-    size = 6 * sigma + 1
-    if gauss_kernel is None:
-        g = _gaussian(size)
-        gauss_kernel = g
-    else:
-        g = gauss_kernel
-    g_x = [int(max(1, -ul[0])), int(min(br[0], image.shape[1])) - int(max(1, ul[0])) + int(max(1, -ul[0]))]
-    g_y = [int(max(1, -ul[1])), int(min(br[1], image.shape[0])) - int(max(1, ul[1])) + int(max(1, -ul[1]))]
-    img_x = [int(max(1, ul[0])), int(min(br[0], image.shape[1]))]
-    img_y = [int(max(1, ul[1])), int(min(br[1], image.shape[0]))]
-    assert (g_x[0] > 0 and g_y[1] > 0)
-    image[img_y[0] - 1:img_y[1], img_x[0] - 1:img_x[1]
-          ] = image[img_y[0] - 1:img_y[1], img_x[0] - 1:img_x[1]] + g[g_y[0] - 1:g_y[1], g_x[0] - 1:g_x[1]]
-    image[image > 1] = 1
-    return image
-
-
-def transform(point, center, scale, resolution, invert=False):
-    """Generate and affine transformation matrix.
-
-    Given a set of points, a center, a scale and a targer resolution, the
-    function generates and affine transformation matrix. If invert is ``True``
-    it will produce the inverse transformation.
+def get_preds_fromhm(hm: torch.Tensor):
+    """Obtain (x,y) coordinates given a set of N heatmaps.
 
     Arguments:
-        point {torch.tensor} -- the input 2D point
-        center {torch.tensor or numpy.array} -- the center around which to perform the transformations
-        scale {float} -- the scale of the face/object
-        resolution {float} -- the output resolution
+        hm {torch.tensor} -- the predicted heatmaps, of shape [B, N, W, H]
 
     Keyword Arguments:
-        invert {bool} -- define wherever the function should produce the direct or the
-        inverse transformation matrix (default: {False})
+        center {torch.tensor} -- the center of the bounding box (default: {None})
+        scale {float} -- face scale (default: {None})
     """
-    _pt = torch.ones(3)
-    _pt[0] = point[0]
-    _pt[1] = point[1]
+    B, C, H, W = hm.shape # [N, 68, 64, 64]
+    hm_reshape = hm.reshape(B, C, H * W) # [N, 68, 4096]
+    idx = torch.argmax(hm_reshape, dim=-1) + 1 # [N, 68]
+    # scores = torch.gather(hm_reshape, -1, idx.unsqueeze(-1)).squeeze(-1)
 
-    h = 200.0 * scale
-    t = torch.eye(3)
-    t[0, 0] = resolution / h
-    t[1, 1] = resolution / h
-    t[0, 2] = resolution * (-center[0] / h + 0.5)
-    t[1, 2] = resolution * (-center[1] / h + 0.5)
+    # Recover initial predicted x and y positions from flat indices
+    preds = idx.repeat_interleave(2) # [N, 68, 2]
+    preds = preds.reshape(B, C, 2).float()
+    preds_x = (preds[:, :, 0] - 1) % W
+    preds_y = torch.floor((preds[:, :, 1] - 1) / H)
+    preds[:, :, 0] = preds_x + 1
+    preds[:, :, 1] = preds_y + 1
 
-    if invert:
-        t = torch.inverse(t)
+    # Now compute the offset using gradients around the predicted location
+    px = preds[:, :, 0].long() - 1  # 0-based
+    py = preds[:, :, 1].long() - 1
 
-    new_point = (torch.matmul(t, _pt))[0:2]
+    # Mask to exclude border positions
+    valid = (px > 0) & (px < W - 1) & (py > 0) & (py < H - 1)
 
-    return new_point.int()
+    # Flatten for indexing
+    flat_idx = torch.arange(B * C, device=hm.device)
+    hm_reshaped = hm.reshape(B * C, H, W)
+    px_flat = px.reshape(-1)
+    py_flat = py.reshape(-1)
+    valid_flat = valid.reshape(-1)
 
+    dx = torch.zeros_like(px_flat, dtype=torch.float32)
+    dy = torch.zeros_like(py_flat, dtype=torch.float32)
+
+    # Only compute diffs where valid
+    vfi = flat_idx[valid_flat]
+    vpx = px_flat[valid_flat]
+    vpy = py_flat[valid_flat]
+    dx[valid_flat] = hm_reshaped[vfi, vpy, vpx + 1] - hm_reshaped[vfi, vpy, vpx - 1]
+    dy[valid_flat] = hm_reshaped[vfi, vpy + 1, vpx] - hm_reshaped[vfi, vpy - 1, vpx]
+
+    # Apply offset
+    offset = torch.stack([torch.sign(dx), torch.sign(dy)], dim=1).reshape(B, C, 2) * 0.25
+    preds = (preds + offset - 0.5) * 4
+
+    return preds
+
+def load_file_from_url(url, model_dir=None, progress=True, check_hash=False, file_name=None):
+    if model_dir is None:
+        hub_dir = get_dir()
+        model_dir = os.path.join(hub_dir, 'checkpoints')
+
+    try:
+        os.makedirs(model_dir)
+    except OSError as e:
+        if e.errno == errno.EEXIST:
+            # Directory already exists, ignore.
+            pass
+        else:
+            # Unexpected OSError, re-raise.
+            raise
+
+    parts = urlparse(url)
+    filename = os.path.basename(parts.path)
+    if file_name is not None:
+        filename = file_name
+    cached_file = os.path.join(model_dir, filename)
+    if not os.path.exists(cached_file):
+        sys.stderr.write('Downloading: "{}" to {}\n'.format(url, cached_file))
+        hash_prefix = None
+        if check_hash:
+            r = HASH_REGEX.search(filename)  # r is Optional[Match[str]]
+            hash_prefix = r.group(1) if r else None
+        download_url_to_file(url, cached_file, hash_prefix, progress=progress)
+
+    return cached_file
+
+# ====================================================================================
+
+def legacy_get_preds_fromhm(hm, center=None, scale=None):
+    """Obtain (x,y) coordinates given a set of N heatmaps. If the center
+    and the scale is provided the function will return the points also in
+    the original coordinate frame.
+
+    Arguments:
+        hm {ndarray} -- the predicted heatmaps, of shape [B, N, W, H]
+
+    Keyword Arguments:
+        center {torch.tensor} -- the center of the bounding box (default: {None})
+        scale {float} -- face scale (default: {None})
+    """
+    B, C, H, W = hm.shape
+    hm_reshape = hm.reshape(B, C, H * W)
+    idx = np.argmax(hm_reshape, axis=-1)
+    scores = np.take_along_axis(hm_reshape, np.expand_dims(idx, axis=-1), axis=-1).squeeze(-1)
+    preds, preds_orig = _get_preds_fromhm(hm, idx, center, scale)
+
+    return preds, preds_orig, scores
 
 def crop(image, center, scale, resolution=256.0):
     """Center crops an image or set of heatmaps
@@ -133,7 +186,7 @@ def crop(image, center, scale, resolution=256.0):
 
     Returns:
         [type] -- [description]
-    """  # Crop around the center point
+    """ 
     """ Crops the image around the center. Input is expected to be an np.ndarray """
     ul = transform([1, 1], center, scale, resolution, True)
     br = transform([resolution, resolution], center, scale, resolution, True)
@@ -149,8 +202,8 @@ def crop(image, center, scale, resolution=256.0):
     oldY = np.array([max(1, ul[1] + 1), min(br[1], ht)], dtype=np.int32) #type: ignore
     newImg[newY[0] - 1:newY[1], newX[0] - 1:newX[1]
            ] = image[oldY[0] - 1:oldY[1], oldX[0] - 1:oldX[1], :]
-    newImg = cv2.resize(newImg, dsize=(int(resolution), int(resolution)),
-                        interpolation=cv2.INTER_LINEAR)
+    # newImg = cv2.resize(newImg, dsize=(int(resolution), int(resolution)),
+    #                     interpolation=cv2.INTER_LINEAR)
     return newImg
 
 # @mesure_temps
@@ -190,76 +243,91 @@ def transform_np(point, center, scale, resolution, invert=False):
 
     return new_point.astype(np.int32)
 
-# @mesure_temps
-def get_preds_fromhm(hm, center=None, scale=None):
-    """Obtain (x,y) coordinates given a set of N heatmaps. If the center
-    and the scale is provided the function will return the points also in
-    the original coordinate frame.
+def transform(point, center, scale, resolution, invert=False):
+    """Generate and affine transformation matrix.
+
+    Given a set of points, a center, a scale and a targer resolution, the
+    function generates and affine transformation matrix. If invert is ``True``
+    it will produce the inverse transformation.
 
     Arguments:
-        hm {torch.tensor} -- the predicted heatmaps, of shape [B, N, W, H]
+        point {torch.tensor} -- the input 2D point
+        center {torch.tensor or numpy.array} -- the center around which to perform the transformations
+        scale {float} -- the scale of the face/object
+        resolution {float} -- the output resolution
 
     Keyword Arguments:
-        center {torch.tensor} -- the center of the bounding box (default: {None})
-        scale {float} -- face scale (default: {None})
+        invert {bool} -- define wherever the function should produce the direct or the
+        inverse transformation matrix (default: {False})
     """
-    B, C, H, W = hm.shape
-    hm_reshape = hm.reshape(B, C, H * W)
-    idx = np.argmax(hm_reshape, axis=-1)
-    scores = np.take_along_axis(hm_reshape, np.expand_dims(idx, axis=-1), axis=-1).squeeze(-1)
-    preds, preds_orig = _get_preds_fromhm(hm, idx, center, scale)
+    _pt = torch.ones(3)
+    _pt[0] = point[0]
+    _pt[1] = point[1]
 
-    return preds, preds_orig, scores
+    h = 200.0 * scale
+    t = torch.eye(3)
+    t[0, 0] = resolution / h
+    t[1, 1] = resolution / h
+    t[0, 2] = resolution * (-center[0] / h + 0.5)
+    t[1, 2] = resolution * (-center[1] / h + 0.5)
 
-# @jit(nopython=True)
+    if invert:
+        t = torch.inverse(t)
+
+    new_point = (torch.matmul(t, _pt))[0:2]
+
+    return new_point.int()
+
 def _get_preds_fromhm(hm, idx, center=None, scale=None):
-    """Obtain (x,y) coordinates given a set of N heatmaps and the
-    coresponding locations of the maximums. If the center
-    and the scale is provided the function will return the points also in
-    the original coordinate frame.
-
-    Arguments:
-        hm {torch.tensor} -- the predicted heatmaps, of shape [B, N, W, H]
-
-    Keyword Arguments:
-        center {torch.tensor} -- the center of the bounding box (default: {None})
-        scale {float} -- face scale (default: {None})
     """
-    B, C, H, W = hm.shape
-    idx += 1
-    preds = idx.repeat(2).reshape(B, C, 2).astype(np.float32)
-    preds[:, :, 0] = (preds[:, :, 0] - 1) % W + 1
-    preds[:, :, 1] = np.floor((preds[:, :, 1] - 1) / H) + 1
+    Vectorized version of the heatmap prediction extraction.
+    """
+    B, C, H, W = hm.shape  # e.g., 1, 68, 64, 64
+    idx = idx + 1  # match behavior of original
 
-    for i in range(B):
-        for j in range(C):
-            hm_ = hm[i, j, :]
-            pX, pY = int(preds[i, j, 0]) - 1, int(preds[i, j, 1]) - 1
-            if pX > 0 and pX < 63 and pY > 0 and pY < 63:
-                diff = np.array(
-                    [hm_[pY, pX + 1] - hm_[pY, pX - 1],
-                     hm_[pY + 1, pX] - hm_[pY - 1, pX]])
-                preds[i, j] += np.sign(diff) * 0.25
+    # Recover initial predicted x and y positions from flat indices
+    preds = idx.repeat(2).reshape(B, C, 2).astype(np.float32)
+    preds_x = (preds[:, :, 0] - 1) % W
+    preds_y = np.floor((preds[:, :, 1] - 1) / H)
+    preds[:, :, 0] = preds_x + 1
+    preds[:, :, 1] = preds_y + 1
+
+    # Now compute the offset using gradients around the predicted location
+    px = preds[:, :, 0].astype(np.int64) - 1  # 0-based
+    py = preds[:, :, 1].astype(np.int64) - 1
+
+    # Mask to exclude border positions
+    valid = (px > 0) & (px < W - 1) & (py > 0) & (py < H - 1)
+
+    # Flatten for indexing
+    flat_idx = np.arange(B * C)
+    hm_reshaped = hm.reshape(B * C, H, W)
+    px_flat = px.reshape(-1)
+    py_flat = py.reshape(-1)
+    valid_flat = valid.reshape(-1)
+
+    # Only compute diffs where valid
+    dx = np.zeros_like(px_flat, dtype=np.float32)
+    dy = np.zeros_like(py_flat, dtype=np.float32)
+
+    # Get gradient differences
+    dx[valid_flat] = hm_reshaped[flat_idx[valid_flat], py_flat[valid_flat], px_flat[valid_flat] + 1] - \
+                     hm_reshaped[flat_idx[valid_flat], py_flat[valid_flat], px_flat[valid_flat] - 1]
+    dy[valid_flat] = hm_reshaped[flat_idx[valid_flat], py_flat[valid_flat] + 1, px_flat[valid_flat]] - \
+                     hm_reshaped[flat_idx[valid_flat], py_flat[valid_flat] - 1, px_flat[valid_flat]]
+
+    # Apply offset
+    offset = np.stack([np.sign(dx), np.sign(dy)], axis=1).reshape(B, C, 2) * 0.25
+    preds += offset
 
     preds -= 0.5
-
     preds_orig = np.zeros_like(preds)
     if center is not None and scale is not None:
         for i in range(B):
             for j in range(C):
                 preds_orig[i, j] = transform_np(
                     preds[i, j], center, scale, H, True)
-
     return preds, preds_orig
-
-
-def create_target_heatmap(target_landmarks, centers, scales):
-    heatmaps = np.zeros((target_landmarks.shape[0], 68, 64, 64), dtype=np.float32)
-    for i in range(heatmaps.shape[0]):
-        for p in range(68):
-            landmark_cropped_coor = transform(target_landmarks[i, p] + 1, centers[i], scales[i], 64, invert=False)
-            heatmaps[i, p] = draw_gaussian(heatmaps[i, p], landmark_cropped_coor + 1, 2)
-    return torch.tensor(heatmaps)
 
 
 def create_bounding_box(target_landmarks, expansion_factor=0.0):
@@ -328,60 +396,3 @@ def flip(tensor, is_label=False):
         tensor = tensor.flip(tensor.ndimension() - 1)
 
     return tensor
-
-
-def get_image(image_or_path):
-    """Reads an image from file or array/tensor and converts it to RGB (H,W,3).
-
-    Arguments:
-        tensor {Sstring, numpy.array or torch.tensor} -- [the input image or path to it]
-    """
-    if isinstance(image_or_path, str):
-        try:
-            image = io.imread(image_or_path)
-        except IOError:
-            print("error opening file :: ", image_or_path)
-            return None
-    elif isinstance(image_or_path, torch.Tensor):
-        image = image_or_path.detach().cpu().numpy()
-    else:
-        image = image_or_path
-
-    if image.ndim == 2:
-        image = color.gray2rgb(image)
-    elif image.ndim == 4:
-        image = image[..., :3]
-
-    return image
-
-
-# Pytorch load supports only pytorch models
-def load_file_from_url(url, model_dir=None, progress=True, check_hash=False, file_name=None):
-    if model_dir is None:
-        hub_dir = get_dir()
-        model_dir = os.path.join(hub_dir, 'checkpoints')
-
-    try:
-        os.makedirs(model_dir)
-    except OSError as e:
-        if e.errno == errno.EEXIST:
-            # Directory already exists, ignore.
-            pass
-        else:
-            # Unexpected OSError, re-raise.
-            raise
-
-    parts = urlparse(url)
-    filename = os.path.basename(parts.path)
-    if file_name is not None:
-        filename = file_name
-    cached_file = os.path.join(model_dir, filename)
-    if not os.path.exists(cached_file):
-        sys.stderr.write('Downloading: "{}" to {}\n'.format(url, cached_file))
-        hash_prefix = None
-        if check_hash:
-            r = HASH_REGEX.search(filename)  # r is Optional[Match[str]]
-            hash_prefix = r.group(1) if r else None
-        download_url_to_file(url, cached_file, hash_prefix, progress=progress)
-
-    return cached_file

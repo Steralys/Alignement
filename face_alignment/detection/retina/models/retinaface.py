@@ -44,7 +44,7 @@ class LandmarkHead(nn.Module):
         return out.view(out.shape[0], -1, 10)
 
 class RetinaFace(nn.Module):
-    def __init__(self, cfg = None, phase = 'train', weights_path='', device="cuda"):
+    def __init__(self, cfg, phase = 'train', weights_path='', device="cuda"):
         """
         :param cfg:  Network related settings.
         :param phase: train or test.
@@ -69,7 +69,7 @@ class RetinaFace(nn.Module):
             import torchvision.models as models
             backbone = models.resnet50(pretrained=cfg['pretrain'])
 
-        self.body = _utils.IntermediateLayerGetter(backbone, cfg['return_layers'])
+        self.body = _utils.IntermediateLayerGetter(backbone, cfg['return_layers']) # type: ignore
         in_channels_stage2 = cfg['in_channel']
         in_channels_list = [
             in_channels_stage2 * 2,
@@ -118,10 +118,11 @@ class RetinaFace(nn.Module):
 
         bbox_regressions = torch.cat([self.BboxHead[i](feature) for i, feature in enumerate(features)], dim=1)
         classifications = torch.cat([self.ClassHead[i](feature) for i, feature in enumerate(features)],dim=1)
-        ldm_regressions = torch.cat([self.LandmarkHead[i](feature) for i, feature in enumerate(features)], dim=1)
+        # ldm_regressions = torch.cat([self.LandmarkHead[i](feature) for i, feature in enumerate(features)], dim=1)
 
-        if self.phase == 'train':
-            output = (bbox_regressions, classifications, ldm_regressions)
-        else:
-            output = (bbox_regressions, F.softmax(classifications, dim=-1), ldm_regressions)
+        # if self.phase == 'train':
+        #     output = (bbox_regressions, classifications, ldm_regressions)
+        # else:
+        #     output = (bbox_regressions, F.softmax(classifications, dim=-1), ldm_regressions)
+        output = (bbox_regressions, F.softmax(classifications, dim=-1), None)
         return output

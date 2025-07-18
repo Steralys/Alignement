@@ -1,0 +1,199 @@
+import torch
+from tqdm import tqdm
+from utils import crop_with_centers_scales, get_preds_fromhm, load_file_from_url
+from detection.retina.pytorch_retinaface import Pytorch_RetinaFace
+import time
+from matplotlib import pyplot as plt
+import matplotlib.patches as patches
+from typing import Optional
+
+default_model_urls = {
+    '2DFAN-4': 'https://www.adrianbulat.com/downloads/python-fan/2DFAN4-cd938726ad.zip',
+    '3DFAN-4': 'https://www.adrianbulat.com/downloads/python-fan/3DFAN4-4a694010b9.zip',
+    'depth': 'https://www.adrianbulat.com/downloads/python-fan/depth-6c4283c0e0.zip',
+}
+
+models_urls = {
+    '1.6': {
+        '2DFAN-4': 'https://www.adrianbulat.com/downloads/python-fan/2DFAN4_1.6-c827573f02.zip',
+        '3DFAN-4': 'https://www.adrianbulat.com/downloads/python-fan/3DFAN4_1.6-ec5cf40a1d.zip',
+        'depth': 'https://www.adrianbulat.com/downloads/python-fan/depth_1.6-2aa3f18772.zip',
+    },
+    '1.5': {
+        '2DFAN-4': 'https://www.adrianbulat.com/downloads/python-fan/2DFAN4_1.5-a60332318a.zip',
+        '3DFAN-4': 'https://www.adrianbulat.com/downloads/python-fan/3DFAN4_1.5-176570af4d.zip',
+        'depth': 'https://www.adrianbulat.com/downloads/python-fan/depth_1.5-bc10f98e39.zip',
+    },
+}
+
+def fill_none_with_precedent(boxes, n):
+    filled = []
+    last_valid = None
+    none_count = 0
+    for i, box in enumerate(boxes):
+        if box is not None:
+            filled.append(box)
+            last_valid = box
+            none_count = 0
+        else:
+            none_count += 1
+            if last_valid is not None and none_count <= n:
+                filled.append(last_valid)
+            else:
+                raise RuntimeError(f"More than {n} consecutive None values at index {i}")
+    return filled
+
+
+class FaceAlignment:
+    def __init__(self, device='cuda'):
+        self.device = device
+
+        network_size = 4
+        pytorch_version = torch.__version__
+        if 'dev' in pytorch_version:
+            pytorch_version = pytorch_version.rsplit('.', 2)[0]
+        else:
+            pytorch_version = pytorch_version.rsplit('.', 1)[0]
+
+        if 'cuda' in device:
+            torch.backends.cudnn.benchmark = True
+
+        self.face_detector = Pytorch_RetinaFace(top_k=20, keep_top_k=10, device=device, confidence_threshold=0.5)
+
+        # Initialise the face alignemnt networks
+        network_name = '2DFAN-' + str(network_size)
+        self.face_alignment_net = torch.jit.load(
+            load_file_from_url(models_urls.get(pytorch_version, default_model_urls)[network_name]))
+
+        self.face_alignment_net.to(device, dtype=torch.float32)
+        self.face_alignment_net.eval()
+
+    @torch.no_grad()
+    def detect_faces(self, image_batch: torch.Tensor, batch_size=8, mode="v1"):
+        """
+        Keeps the biggest face in each frame
+        Args:
+            image_batch: TCHW uint8
+            batch_size: int, 32 too much for 8gb
+            mode: v1 batch_nms, v2 for loop nms needs benchmark
+        Returns:
+            bbox_batch: torch.Tensor, shape [N, 4] with x1, y1, x2, y2
+        """
+        return self.face_detector.detect_face_v2(image_batch, batch_size, mode)
+
+    def sample_crop(self, image_batch: torch.Tensor, bbox: torch.Tensor, batch_size=8):
+        """
+        Keeps the biggest face in each frame
+        Args:
+            image_batch: TCHW uint8
+            batch_size: int, 16 too much for 8gb
+        Returns:
+            cropped: torch.Tensor, shape [N, 3, 256, 256] with cropped faces
+        """
+        start_crop = time.time()
+
+        assert image_batch.shape[0] == bbox.shape[0], "Image batch and bbox batch must be the same size"
+        x1, y1, x2, y2 = bbox[:, 0], bbox[:, 1], bbox[:, 2], bbox[:, 3]
+        centers = torch.stack([x2 - (x2 - x1) * 0.5, y2 - (y2 - y1) * 0.62]).permute(1, 0)
+        scales = (x2 - x1 + y2 - y1) / 256
+
+        cropped = []
+        for i in tqdm(range(0, image_batch.shape[0], batch_size), desc="Crop-Sampling"):
+            if i + batch_size > image_batch.shape[0]:
+                batch_slice = image_batch[i:]
+                center = centers[i:]
+                scale = scales[i:]
+            else:
+                batch_slice = image_batch[i:i + batch_size]
+                center = centers[i:i + batch_size]
+                scale = scales[i:i + batch_size]
+            
+            result = crop_with_centers_scales(
+                batch_slice.to(device=self.device, dtype=torch.float32),
+                center,
+                scale,
+                (256, 256),
+            )
+            cropped.append(result)
+
+        cropped = torch.cat(cropped, dim=0)
+        print(f"[INFO] Crop-Sampling time: {time.time() - start_crop:.4f} seconds")
+        return cropped
+
+    @torch.no_grad()
+    def detect_landmarks(self, image_batch: torch.Tensor, batch_size=8):
+        """
+        Detects landmarks in the given image batch. Must be cropped to faces.
+        Args:
+            image_batch: TCHW float32 256x256
+            batch_size: int
+        Returns:
+            landmarks: torch.Tensor, shape [N, 68, 2] with x, y coordinates of landmarks
+        """
+        start_ld = time.time()
+        image_batch = image_batch.div(255.0)
+
+        landmarks = []
+        for i in range(0, image_batch.shape[0], batch_size):
+            if i + batch_size > image_batch.shape[0]:
+                batch_slice = image_batch[i:]
+            else:
+                batch_slice = image_batch[i:i + batch_size]
+            out = self.face_alignment_net(batch_slice.to(device=self.device, dtype=torch.float32))
+            pts = get_preds_fromhm(out)
+            landmarks.append(pts)
+
+        landmarks = torch.cat(landmarks, dim=0)
+        print(f"[INFO] Landmark Detect time: {time.time() - start_ld:.4f} seconds")
+        torch.cuda.empty_cache()
+        return landmarks
+
+    @torch.no_grad()
+    def process(self, image_batch: torch.Tensor):
+        """
+        Full pipeline
+        Args:
+            image_batch: TCHW uint8
+        Returns:
+            landmarks: torch.Tensor, shape [N, 68, 2] with x, y coordinates of landmarks
+        """
+        start = time.time()
+        bboxs = self.detect_faces(image_batch)
+        cropped = self.sample_crop(image_batch, bboxs)
+        landmarks = self.detect_landmarks(cropped)
+        print(f"[INFO] Total Face Alignement Time: {time.time() - start:.4f} seconds")
+        return landmarks
+
+    def show_frame(
+        self,
+        image_batch: torch.Tensor,
+        idx: int,
+        bboxs: Optional[torch.Tensor]=None,
+        landmarks: Optional[torch.Tensor]=None
+    ):
+        """
+        Select a frame from the provided image batch and display it using matplotlib,
+        optional display of bboxs / landmarks
+        Args:
+            image_batch: TCHW uint8
+            idx: index of the frame
+            bboxs: [B, 4]=>(idx)
+            landmarks: [B, 68, 2]=>(idx)
+        """
+        B = image_batch.shape[0]
+        assert idx < B, f"frame index out of range, max: {B}"
+
+        frame = image_batch[idx]
+        bbox = bboxs[idx] if bboxs is not None else None
+        lds = landmarks[idx] if landmarks is not None else None
+
+        plt.imshow(frame.permute(1, 2 ,0).cpu().numpy() / 255)
+        if bbox is not None:
+            x1, y1, x2, y2 = bbox.cpu().numpy()
+            w, h = x2 - x1, y2 - y1
+            rect = patches.Rectangle((x1, y1), w, h, linewidth=1, edgecolor='lime', facecolor='none')
+            plt.gca().add_patch(rect)
+        if lds is not None:
+            lds = lds.cpu().numpy()
+            x, y = lds[:, 0], lds[:, 1]
+            plt.scatter(x, y, s=5, c='red', marker='.')

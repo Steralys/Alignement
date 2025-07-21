@@ -263,16 +263,15 @@ class Pytorch_RetinaFace:
 
         boxes = []
         no_face_frame_idx = []
-        last_batch_padding = batch_size - (B % batch_size)
         for i in tqdm(range(0, B, batch_size), desc="Detecting faces"):
             if i + batch_size > B:
                 # Last batch may be smaller than batch_size
                 batch_slice = image_batch[i:]
-                # repeat the last frame to fill the batch
-                batch_slice = torch.cat([
-                    batch_slice, 
-                    image_batch[-1:].repeat(last_batch_padding, 1, 1, 1)
-                ], dim=0)
+                # repeat the last frame to fill the batch for compile purpose
+                # batch_slice = torch.cat([
+                #     batch_slice, 
+                #     image_batch[-1:].repeat(last_batch_padding, 1, 1, 1)
+                # ], dim=0)
             else:
                 batch_slice = image_batch[i:i+batch_size] 
 
@@ -288,7 +287,8 @@ class Pytorch_RetinaFace:
         torch.cuda.empty_cache()
 
         boxes = torch.cat(boxes, dim=0)
-        return boxes[:-last_batch_padding]
+        return boxes
+        # return boxes[:-last_batch_padding]
 
     @torch.no_grad()
     def _process_batch(self, image_batch: torch.Tensor, prior_data, scale, resize):

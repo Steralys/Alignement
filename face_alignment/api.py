@@ -81,21 +81,32 @@ class FaceAlignment:
         """
         return self.face_detector.detect_face_v2(image_batch, batch_size, mode)
 
-    def sample_crop(self, image_batch: torch.Tensor, bbox: torch.Tensor, batch_size=8):
+    def sample_crop(
+            self,
+            image_batch: torch.Tensor,
+            bbox: torch.Tensor,
+            size: tuple[int, int]=(256, 256),
+            scale_factor=None,
+            batch_size=8
+        ):
         """
         Keeps the biggest face in each frame
         Args:
             image_batch: TCHW uint8
             batch_size: int, 16 too much for 8gb
+            size: height, width of cropped images
+            scale_factor: default(auto) => proportional to size
         Returns:
             cropped: torch.Tensor, shape [N, 3, 256, 256] with cropped faces
         """
         start_crop = time.time()
 
+        if not scale_factor:
+            scale_factor = size[0]
         assert image_batch.shape[0] == bbox.shape[0], "Image batch and bbox batch must be the same size"
         x1, y1, x2, y2 = bbox[:, 0], bbox[:, 1], bbox[:, 2], bbox[:, 3]
         centers = torch.stack([x2 - (x2 - x1) * 0.5, y2 - (y2 - y1) * 0.62]).permute(1, 0)
-        scales = (x2 - x1 + y2 - y1) / 256
+        scales = (x2 - x1 + y2 - y1) / scale_factor
 
         cropped = []
         for i in tqdm(range(0, image_batch.shape[0], batch_size), desc="Crop-Sampling"):
@@ -112,7 +123,7 @@ class FaceAlignment:
                 batch_slice.to(device=self.device, dtype=torch.float32),
                 center,
                 scale,
-                (256, 256),
+                size,
             )
             cropped.append(result)
 

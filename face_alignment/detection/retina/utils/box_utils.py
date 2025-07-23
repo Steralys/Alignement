@@ -271,6 +271,42 @@ def decode_landm(pre, priors, variances):
                         ), dim=1)
     return landms
 
+def batch_decode_eyes(pre, priors, variances):
+    """
+    Decode first two landm (eyes) from predictions using priors to undo the encoding.
+    Args:
+        pre (tensor): landm predictions, Shape: [batch_size, num_priors, 10]
+        priors (tensor): Prior boxes in center-offset form, Shape: [num_priors,4]
+        variances (list[float]): Variances of priorboxes
+    Returns:
+        decoded landm predictions: Shape [batch_size, num_priors, 10]
+    """
+    priors = priors.unsqueeze(0)  # [1, num_priors, 4]
+    landms = torch.cat((
+        priors[:, :, :2] + pre[:, :, 0:2] * variances[0] * priors[:, :, 2:],
+        priors[:, :, :2] + pre[:, :, 2:4] * variances[0] * priors[:, :, 2:],
+    ), dim=2)
+    return landms
+
+def batch_decode_landm(pre, priors, variances):
+    """
+    Decode landm from predictions using priors to undo the encoding.
+    Args:
+        pre (tensor): landm predictions, Shape: [batch_size, num_priors, 10]
+        priors (tensor): Prior boxes in center-offset form, Shape: [num_priors,4]
+        variances (list[float]): Variances of priorboxes
+    Returns:
+        decoded landm predictions: Shape [batch_size, num_priors, 10]
+    """
+    priors = priors.unsqueeze(0)  # [1, num_priors, 4]
+    landms = torch.cat((
+        priors[:, :, :2] + pre[:, :, 0:2] * variances[0] * priors[:, :, 2:],
+        priors[:, :, :2] + pre[:, :, 2:4] * variances[0] * priors[:, :, 2:],
+        priors[:, :, :2] + pre[:, :, 4:6] * variances[0] * priors[:, :, 2:],
+        priors[:, :, :2] + pre[:, :, 6:8] * variances[0] * priors[:, :, 2:],
+        priors[:, :, :2] + pre[:, :, 8:10] * variances[0] * priors[:, :, 2:]
+    ), dim=2)
+    return landms
 
 def log_sum_exp(x):
     """Utility function for computing log_sum_exp while determining

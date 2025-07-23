@@ -9,7 +9,7 @@ from .data import cfg_mnet, cfg_re50
 from .layers.functions.prior_box import PriorBox
 # from .utils.nms.py_cpu_nms import py_cpu_nms
 from .models.retinaface import RetinaFace
-from .utils.box_utils import batch_decode #, decode, decode_landm
+from .utils.box_utils import batch_decode, batch_decode_eyes #, decode, 
 
 
 models_urls = {
@@ -263,6 +263,7 @@ class Pytorch_RetinaFace:
 
         boxes = []
         no_face_frame_idx = []
+        landmarks = []
         for i in tqdm(range(0, B, batch_size), desc="Detecting faces"):
             if i + batch_size > B:
                 # Last batch may be smaller than batch_size
@@ -275,7 +276,7 @@ class Pytorch_RetinaFace:
             else:
                 batch_slice = image_batch[i:i+batch_size] 
 
-            out, nfidx = process_batch(
+            out, nfidx, lds = process_batch(
                 batch_slice.to(dtype=torch.float32, device=self.device) - mean_values,
                 prior_data=prior_data,
                 scale=scale,
@@ -283,11 +284,14 @@ class Pytorch_RetinaFace:
             )
             boxes.append(out)
             no_face_frame_idx.extend(nfidx)
+            landmarks.append(lds)
             
         torch.cuda.empty_cache()
 
         boxes = torch.cat(boxes, dim=0)
-        return boxes
+        landmarks = torch.cat(landmarks, dim=0)
+        landmarks = landmarks.reshape(landmarks.shape[0], 2, 2) # [B, (xa, ya, xb, yb)] => [B, 2, 2]
+        return boxes, landmarks
         # return boxes[:-last_batch_padding]
 
     @torch.no_grad()
@@ -296,12 +300,15 @@ class Pytorch_RetinaFace:
 
         boxes = batch_decode(loc, prior_data, self.cfg['variance'])
         boxes = boxes * scale / resize
+        landms = batch_decode_eyes(landms, prior_data, self.cfg['variance'])
+        landms = landms * scale / resize
         scores = conf[:, :, 1]
 
         # Ignore low scores
         inds = torch.nonzero(scores > self.confidence_threshold, as_tuple=False)
         # inds shape: [N, 2], where inds[:,0] is batch index, inds[:,1] is box index
         selected_boxes = boxes[inds[:, 0], inds[:, 1]]
+        selected_landms = landms[inds[:, 0], inds[:, 1]]
         selected_scores = scores[inds[:, 0], inds[:, 1]]
 
         keep = batched_nms(
@@ -314,6 +321,7 @@ class Pytorch_RetinaFace:
         frame_inds = inds[keep, 0]
         selected_boxes = selected_boxes[keep]
         selected_scores = selected_scores[keep]
+        selected_landms = selected_landms[keep]
         surfaces = (selected_boxes[:, 2] - selected_boxes[:, 0]) * (selected_boxes[:, 3] - selected_boxes[:, 1])
     
         _, sorted_idx = torch.sort(frame_inds * 10**7 + surfaces, descending=True)
@@ -328,7 +336,7 @@ class Pytorch_RetinaFace:
         max_indices = sorted_idx[cum_sum]
 
         # Need to implement no face detected case
-        return selected_boxes[max_indices].flip(0), []
+        return selected_boxes[max_indices].flip(0), [], selected_landms[max_indices].flip(0)
     
     @torch.no_grad()
     def _process_batch_v2(self, image_batch: torch.Tensor, prior_data, scale, resize):

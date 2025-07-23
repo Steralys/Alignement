@@ -102,3 +102,4 @@ ENV/
 
 *.json
 activate_env.bat
+*.mp4

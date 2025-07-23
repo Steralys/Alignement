@@ -1,6 +1,6 @@
 import torch
 from tqdm import tqdm
-from utils import crop_with_centers_scales, get_preds_fromhm, load_file_from_url
+from utils import crop_csr, crop_with_centers_scales, get_preds_fromhm, load_file_from_url
 from detection.retina.pytorch_retinaface import Pytorch_RetinaFace
 import time
 from matplotlib import pyplot as plt
@@ -42,6 +42,33 @@ def fill_none_with_precedent(boxes, n):
             else:
                 raise RuntimeError(f"More than {n} consecutive None values at index {i}")
     return filled
+
+def resize_video(video: torch.Tensor, max_resolution: int = 1280, batch_size: int = 8, device="cuda"):
+    """ 
+    Resizes the video tensor to fit within the max resolution while maintaining aspect ratio.
+    Args:
+        video (torch.Tensor): Input video tensor of shape (B, C, H, W).
+        max_resolution (int): Maximum resolution for the longest side.
+    Returns:
+    tuple:
+        resized (torch.Tensor): Resized video tensor.
+        scale_factor (float): Scale factor used for resizing.
+    """
+    B, C, H, W = video.shape
+    scale_factor = max_resolution / max(H, W)
+
+    resized = []
+    for start in tqdm(range(0, B, batch_size), desc=f"Resizing to {max_resolution} max"):
+        end = min(start + batch_size, B)
+        batch = video[start:end]
+        resized_chunk = torch.nn.functional.interpolate(
+            batch.to(device=device, dtype=torch.float32),
+            scale_factor=scale_factor, 
+            mode='bilinear', align_corners=False
+        ).to(video.dtype)
+        resized.append(resized_chunk.cpu())
+    resized = torch.cat(resized, dim=0)
+    return resized, scale_factor
 
 
 class FaceAlignment:
@@ -130,6 +157,74 @@ class FaceAlignment:
         cropped = torch.cat(cropped, dim=0)
         print(f"[INFO] Crop-Sampling time: {time.time() - start_crop:.4f} seconds")
         return cropped
+
+    @torch.inference_mode()
+    def sample_crop_csr(
+            self,
+            image_batch: torch.Tensor,
+            batch_size=8
+        ):
+        """
+        Keeps the biggest face in each frame
+        Args:
+            image_batch: TCHW uint8, full hd max
+            batch_size: int
+        Returns:
+            tuple:
+                cropped: torch.Tensor, shape [N, 3, 512, 512] with cropped faces
+                landmarks: torch.Tensor, shape [N, 68, 2]
+        """
+        B, C, H, W = image_batch.shape
+
+        # Detect faces, retina face doesn't work well in res > hd
+        MAX_RESOLUTION = 1280
+        if max(H, W) > MAX_RESOLUTION:
+            resized, resize_ratio = resize_video(image_batch, MAX_RESOLUTION, device=self.device)
+            boxes, eyes = self.detect_faces(resized)
+            boxes = boxes / resize_ratio
+            del resized
+        else:
+            boxes, eyes = self.detect_faces(image_batch)
+
+        # Compute face tilt angle
+        eye_vector = eyes[:, 1, :] - eyes[:, 0, :]
+        angles_rad = torch.arctan2(eye_vector[:, 1], eye_vector[:, 0]) * -1
+
+        x1, y1, x2, y2 = boxes[:, 0], boxes[:, 1], boxes[:, 2], boxes[:, 3]
+        centers = torch.stack([x2 - (x2 - x1) * 0.5, y2 - (y2 - y1) * 0.62]).permute(1, 0)
+        scales = (x2 - x1 + y2 - y1) / 300
+
+        # Detect landmarks and prepare 512x512 lipsync inputs
+        landmarks = []
+        cropped = []
+        for start in tqdm(range(0, B, batch_size), desc="Crop-Sampling CSR"):
+            end = min(start + batch_size, B)
+            batch = image_batch[start:end].to(self.device, dtype=torch.float32)
+
+            cropped_256 = crop_csr(
+                batch,
+                centers[start:end],
+                scales[start:end],
+                angles_rad[start:end],
+                out_size=256
+            ) / 255.0
+
+            out = self.face_alignment_net(cropped_256)
+            pts = get_preds_fromhm(out)
+            landmarks.append(pts)
+
+            cropped_512 = crop_csr(
+                batch,
+                centers[start:end],
+                scales[start:end] / 2,
+                angles_rad[start:end],
+                out_size=512
+            )
+            cropped.append(cropped_512.cpu().to(dtype=torch.uint8))
+            torch.cuda.empty_cache()
+        landmarks = torch.cat(landmarks) * 2
+        cropped = torch.cat(cropped)
+        return cropped, landmarks
 
     @torch.no_grad()
     def detect_landmarks(self, image_batch: torch.Tensor, batch_size=8):

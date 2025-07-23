@@ -14,6 +14,7 @@ import time
 from functools import wraps
 from tqdm import tqdm
 
+
 def mesure_temps(func):
     @wraps(func)
     def wrapper(*args, **kwargs):
@@ -67,6 +68,63 @@ def crop_with_centers_scales(frames, centers, scales, out_size):
     cropped = torch.nn.functional.grid_sample(frames, grid, mode='bilinear', align_corners=True)
     return cropped
 
+def crop_csr(frames, centers, scales, rotations, out_size=512):
+    """
+    Crops and rotates videos around center points with given scale and rotation (square crop).
+    
+    Args:
+        frames: (N, 3, H, W) 
+        centers: (N, 2) in (x, y) format 
+        scales: (N,)  - scale factor for square crop size
+        rotations: (N,) - rotation in radians, counterclockwise
+        out_size: int - output size (default 512)
+    
+    Returns:
+        cropped: (N, 3, out_size, out_size) 
+    """
+    N, C, H, W = frames.shape
+    device = frames.device
+    dtype = frames.dtype
+
+    # Normalize center
+    center_x = (centers[:, 0] / (W - 1)) * 2 - 1  # (N,)
+    center_y = (centers[:, 1] / (H - 1)) * 2 - 1  # (N,)
+    # center = torch.stack([center_x, center_y], dim=1)  # (N, 2)
+
+    # Scaling factors
+    scale = scales.view(-1, 1)  # (N, 1)
+    scale_x = (scale[:, 0] * out_size) / (W - 1)  # (N,)
+    scale_y = (scale[:, 0] * out_size) / (H - 1)  # (N,)
+
+    # Create base grid (normalized coordinates in [-1, 1])
+    grid_y, grid_x = torch.meshgrid(
+        torch.linspace(-1, 1, out_size, device=device, dtype=dtype),
+        torch.linspace(-1, 1, out_size, device=device, dtype=dtype),
+        indexing='ij'
+    )
+    base_grid = torch.stack((grid_x, grid_y), dim=-1)  # (H, W, 2)
+    base_grid = base_grid.unsqueeze(0).repeat(N, 1, 1, 1)  # (N, H, W, 2)
+
+    # Build rotation matrix
+    sin = torch.sin(rotations).view(N, 1, 1)
+    cos = torch.cos(rotations).view(N, 1, 1)
+    rot_matrix = torch.stack([
+        torch.stack([cos, -sin], dim=-1),  # (N, 1, 2)
+        torch.stack([sin,  cos], dim=-1)
+    ], dim=-2).squeeze(1)  # (N, 1, 2, 2)
+
+    # Apply rotation
+    grid = base_grid @ rot_matrix  # (N, H, W, 2)
+
+    # Apply scaling
+    grid[..., 0] = grid[..., 0] * scale_x[:, None, None] + center_x[:, None, None]
+    grid[..., 1] = grid[..., 1] * scale_y[:, None, None] + center_y[:, None, None]
+
+    # Sample using grid_sample
+    cropped = torch.nn.functional.grid_sample(
+        frames, grid, mode='bilinear', padding_mode='zeros', align_corners=True
+    )
+    return cropped
 
 def get_preds_fromhm(hm: torch.Tensor):
     """Obtain (x,y) coordinates given a set of N heatmaps.

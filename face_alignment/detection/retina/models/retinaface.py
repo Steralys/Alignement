@@ -118,11 +118,11 @@ class RetinaFace(nn.Module):
 
         bbox_regressions = torch.cat([self.BboxHead[i](feature) for i, feature in enumerate(features)], dim=1)
         classifications = torch.cat([self.ClassHead[i](feature) for i, feature in enumerate(features)],dim=1)
-        # ldm_regressions = torch.cat([self.LandmarkHead[i](feature) for i, feature in enumerate(features)], dim=1)
+        ldm_regressions = torch.cat([self.LandmarkHead[i](feature) for i, feature in enumerate(features)], dim=1)
 
         # if self.phase == 'train':
         #     output = (bbox_regressions, classifications, ldm_regressions)
         # else:
         #     output = (bbox_regressions, F.softmax(classifications, dim=-1), ldm_regressions)
-        output = (bbox_regressions, F.softmax(classifications, dim=-1), None)
+        output = (bbox_regressions, F.softmax(classifications, dim=-1), ldm_regressions)
         return output

@@ -4,6 +4,7 @@ import torch
 from torchvision.ops import batched_nms, nms
 # import numpy as np
 from tqdm import tqdm
+from pathlib import Path
 
 from .data import cfg_mnet, cfg_re50
 from .layers.functions.prior_box import PriorBox
@@ -13,10 +14,10 @@ from .utils.box_utils import batch_decode, batch_decode_eyes #, decode,
 
 
 models_urls = {
-    "pretrained_path": "./detection/retina/weights/mobilenet0.25_Final.pth",
-    "weights_path": "./detection/retina/weights/mobilenetV1X0.25_pretrain.tar",
-    # "pretrained_path": "./face_alignment/detection/retina/weights/mobilenet0.25_Final.pth",
-    # "weights_path": "./face_alignment/detection/retina/weights/mobilenetV1X0.25_pretrain.tar",
+    "pretrained_path": str(Path(__file__).parent/"weights"/"mobilenet0.25_Final.pth"),
+    "weights_path": str(Path(__file__).parent/"weights"/"mobilenetV1X0.25_pretrain.tar"),
+    # "pretrained_path": "./detection/retina/weights/mobilenet0.25_Final.pth",
+    # "weights_path": "./detection/retina/weights/mobilenetV1X0.25_pretrain.tar",
 }
 
 

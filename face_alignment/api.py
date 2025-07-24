@@ -1,11 +1,12 @@
 import torch
 from tqdm import tqdm
-from utils import crop_csr, crop_with_centers_scales, get_preds_fromhm, load_file_from_url
+from utils import crop_csr, crop_with_centers_scales, get_preds_fromhm
 from detection.retina.pytorch_retinaface import Pytorch_RetinaFace
 import time
 from matplotlib import pyplot as plt
 import matplotlib.patches as patches
 from typing import Optional
+from pathlib import Path
 
 default_model_urls = {
     '2DFAN-4': 'https://www.adrianbulat.com/downloads/python-fan/2DFAN4-cd938726ad.zip',
@@ -75,7 +76,6 @@ class FaceAlignment:
     def __init__(self, device='cuda'):
         self.device = device
 
-        network_size = 4
         pytorch_version = torch.__version__
         if 'dev' in pytorch_version:
             pytorch_version = pytorch_version.rsplit('.', 2)[0]
@@ -88,9 +88,8 @@ class FaceAlignment:
         self.face_detector = Pytorch_RetinaFace(top_k=20, keep_top_k=10, device=device, confidence_threshold=0.5)
 
         # Initialise the face alignemnt networks
-        network_name = '2DFAN-' + str(network_size)
-        self.face_alignment_net = torch.jit.load(
-            load_file_from_url(models_urls.get(pytorch_version, default_model_urls)[network_name]))
+        # network_name = '2DFAN-4' https://www.adrianbulat.com/downloads/python-fan/2DFAN4-cd938726ad.zip
+        self.face_alignment_net = torch.jit.load(str(Path(__file__).parent.parent/"ckpt"/"2DFAN4-cd938726ad.zip"))
 
         self.face_alignment_net.to(device, dtype=torch.float32)
         self.face_alignment_net.eval()

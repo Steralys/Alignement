@@ -11,8 +11,5 @@ git clone https://github.com/Steralys/Alignement.git
 cd Alignement
 ```
 ```bash
-mkdir ckpt
-```
-```bash
 wget -P ./ckpt/ https://www.adrianbulat.com/downloads/python-fan/2DFAN4-cd938726ad.zip
 ```

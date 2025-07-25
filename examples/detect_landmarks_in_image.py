@@ -1,4 +1,4 @@
-import face_alignment
+import src
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 from skimage import io
@@ -12,7 +12,7 @@ face_detector_kwargs = {
 }
 
 # Run the 3D face alignment on a test image, without CUDA.
-fa = face_alignment.FaceAlignment(face_alignment.LandmarksType.THREE_D, device='cpu', flip_input=True,
+fa = src.FaceAlignment(src.LandmarksType.THREE_D, device='cpu', flip_input=True,
                                   face_detector=face_detector, face_detector_kwargs=face_detector_kwargs)
 
 try:

@@ -1,7 +1,7 @@
 import torch
 from tqdm import tqdm
-from utils import crop_csr, crop_with_centers_scales, get_preds_fromhm
-from detection.retina.pytorch_retinaface import Pytorch_RetinaFace
+from .utils import crop_csr, crop_with_centers_scales, get_preds_fromhm
+from .detection.retina.pytorch_retinaface import Pytorch_RetinaFace
 import time
 from matplotlib import pyplot as plt
 import matplotlib.patches as patches

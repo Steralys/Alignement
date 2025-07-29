@@ -8,8 +8,5 @@
 git clone https://github.com/Steralys/Alignement.git
 ```
 ```bash
-cd Alignement
-```
-```bash
-wget -P ./ckpt/ https://www.adrianbulat.com/downloads/python-fan/2DFAN4-cd938726ad.zip
+wget -P ./Alignement/ckpt/ https://www.adrianbulat.com/downloads/python-fan/2DFAN4-cd938726ad.zip
 ```

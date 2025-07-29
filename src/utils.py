@@ -68,6 +68,70 @@ def crop_with_centers_scales(frames, centers, scales, out_size):
     cropped = torch.nn.functional.grid_sample(frames, grid, mode='bilinear', align_corners=True)
     return cropped
 
+def paste_csr(cropped_frames, x1y1, sizes, rotations, original_shape):
+    """
+    Pastes cropped & rotated frames back into the original frame space.
+    
+    Args:
+        cropped_frames: (N, 3, out_size, out_size)
+        x1y1: (N, 2) - top-left corner of crop in original image (x1, y1)
+        sizes: (N,) - width/height of the original square crop
+        rotations: (N,) - rotation in radians (same as crop)
+        original_shape: (H, W) - size of the full image
+    
+    Returns:
+        tuple(
+            pasted_frames: (N, 3, H, W) (pasted on black screen),
+            mask: equivalent mask
+        )
+    """
+    N, C, out_size, _ = cropped_frames.shape
+    H, W = original_shape
+    device = cropped_frames.device
+
+    # Create normalized grid in the full image space
+    grid_y, grid_x = torch.meshgrid(
+        torch.linspace(0, H - 1, H, device=device),
+        torch.linspace(0, W - 1, W, device=device),
+        indexing='ij'
+    )
+    full_grid = torch.stack((grid_x, grid_y), dim=-1).unsqueeze(0).repeat(N, 1, 1, 1)  # (N, H, W, 2)
+
+    # Convert full grid to crop-local coordinates
+    # nx1, ny1 = x1.view(N, 1, 1), y1.view(N, 1, 1)
+    size = sizes.view(N, 1, 1, 1)
+
+    # Translate to crop-local (centered at crop)
+    crop_coords = full_grid - x1y1.view(N, 1, 1, 2)  # (N, H, W, 2)
+
+    # Normalize to [-1, 1] for grid_sample
+    crop_coords = (crop_coords / size) * 2 - 1  # (N, H, W, 2)
+
+    # Inverse rotation
+    sin = torch.sin(-rotations).view(N, 1, 1)
+    cos = torch.cos(-rotations).view(N, 1, 1)
+    rot_matrix = torch.stack([
+        torch.stack([cos, -sin], dim=-1),
+        torch.stack([sin,  cos], dim=-1)
+    ], dim=-2).squeeze(1)  # (N, 1, 2, 2)
+
+    # Apply inverse rotation
+    grid = crop_coords @ rot_matrix#.transpose(2, 3)  # (N, H, W, 2)
+
+    # Map to [0, out_size-1] then normalize to [-1, 1]
+    grid = (grid + 1) / 2  # [0,1]
+    grid = grid * (out_size - 1)
+    grid = (grid / (out_size - 1)) * 2 - 1  # normalize again for grid_sample
+
+    # Sample from cropped_frames to reconstruct original frame
+    pasted = torch.nn.functional.grid_sample(
+        cropped_frames, grid, mode='bilinear', padding_mode='border', align_corners=True
+    )
+    mask = torch.nn.functional.grid_sample(
+        cropped_frames, grid, mode='nearest', padding_mode='zeros', align_corners=True
+    )
+    return pasted, mask.bool()
+
 def crop_csr(frames, centers, scales, rotations, out_size=512):
     """
     Crops and rotates videos around center points with given scale and rotation (square crop).
@@ -92,9 +156,11 @@ def crop_csr(frames, centers, scales, rotations, out_size=512):
     # center = torch.stack([center_x, center_y], dim=1)  # (N, 2)
 
     # Scaling factors
-    scale = scales.view(-1, 1)  # (N, 1)
-    scale_x = (scale[:, 0] * out_size) / (W - 1)  # (N,)
-    scale_y = (scale[:, 0] * out_size) / (H - 1)  # (N,)
+    # scale = scales.view(-1, 1)  # (N, 1)
+    # crop_size = scale[:, 0] * out_size
+    crop_size = scales * out_size
+    scale_x = crop_size / (W - 1)  # (N,)
+    scale_y = crop_size / (H - 1)  # (N,)
 
     # Create base grid (normalized coordinates in [-1, 1])
     grid_y, grid_x = torch.meshgrid(
@@ -124,7 +190,15 @@ def crop_csr(frames, centers, scales, rotations, out_size=512):
     cropped = torch.nn.functional.grid_sample(
         frames, grid, mode='bilinear', padding_mode='zeros', align_corners=True
     )
-    return cropped
+
+    # Gather infos needed for pasteback
+    crop_size = crop_size[:, None]
+    x1y1 = centers - crop_size / 2
+    rot = rotations[:, None]
+
+    paste_infos = torch.cat([x1y1, crop_size, rot], dim=1)
+    # assert paste_infos.shape[0] == N and paste_infos.shape[1] == 4 and paste_infos.ndim == 2
+    return cropped, paste_infos
 
 def get_preds_fromhm(hm: torch.Tensor):
     """Obtain (x,y) coordinates given a set of N heatmaps.

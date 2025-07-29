@@ -44,8 +44,7 @@ class Pytorch_RetinaFace:
         
         self.device = device
 
-        # print("Using device:", self.device)
-
+        # Loading the weights two times
         self.net = RetinaFace(cfg=self.cfg, weights_path=weights_path, phase='test', device=self.device).to(self.device)
         self.load_model_weights(pretrained_path)
         self.net.eval()
@@ -56,16 +55,16 @@ class Pytorch_RetinaFace:
         used_pretrained_keys = model_keys & ckpt_keys
         unused_pretrained_keys = ckpt_keys - model_keys
         missing_keys = model_keys - ckpt_keys
-        print('Missing keys:{}'.format(len(missing_keys)))
-        print('Unused checkpoint keys:{}'.format(len(unused_pretrained_keys)))
-        print('Used keys:{}'.format(len(used_pretrained_keys)))
+        # print('Missing keys:{}'.format(len(missing_keys)))
+        # print('Unused checkpoint keys:{}'.format(len(unused_pretrained_keys)))
+        # print('Used keys:{}'.format(len(used_pretrained_keys)))
         assert len(used_pretrained_keys) > 0, 'load NONE from pretrained checkpoint'
         return True
 
 
     def remove_prefix(self, state_dict, prefix):
         ''' Old style model is stored with all names of parameters sharing common prefix 'module.' '''
-        print('remove prefix \'{}\''.format(prefix))
+        # print('remove prefix \'{}\''.format(prefix)) #module.
         f = lambda x: x.split(prefix, 1)[-1] if x.startswith(prefix) else x
         return {f(key): value for key, value in state_dict.items()}
 

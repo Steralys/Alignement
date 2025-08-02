@@ -235,7 +235,14 @@ class FaceAlignment:
         raise NotImplementedError()
     
     @torch.inference_mode()
-    def paste_back_csr(self, original: torch.Tensor, cropped: torch.Tensor, infos: torch.Tensor, batch_size=8):
+    def paste_back_csr(
+        self,
+        original: torch.Tensor,
+        cropped: torch.Tensor,
+        infos: torch.Tensor,
+        submask: torch.Tensor = None,
+        batch_size=8
+    ):
         """
         Paste the cropped frames back on the original video
         Args:
@@ -243,6 +250,7 @@ class FaceAlignment:
             cropped: TCHW
             infos: T4 => T, (x1, y1, original_crop_size, angle)
             batch_size: int
+            submask: Optional T1HW mask same size as cropped
         Returns:
             pasted: torch.Tensor, shape [N, C, H, W]
         """
@@ -250,6 +258,8 @@ class FaceAlignment:
         B, C, H, W = original.shape
         assert cropped.shape[0] == B, f"Got different frame numbers. original: {B}, cropped: {cropped.shape[0]}"
         assert infos.shape[0] == B, f"Crop infos length and frame number don't match. frames: {B}, infos: {infos.shape[0]}"
+        if submask is not None:
+            assert submask.shape[0] == B, f"Submask length and cropped length don't match. frames: {B}, infos: {submask.shape[0]}"
 
         pasted = []
         for start in tqdm(range(0, B, batch_size), desc="Paste-Back CSR"):
@@ -258,6 +268,8 @@ class FaceAlignment:
             original_batch = original[start:end].to(self.device, dtype=torch.float32)
             cropped_batch = cropped[start:end].to(self.device, dtype=torch.float32)
             infos_batch = infos[start:end].to(self.device, dtype=torch.float32)
+            if submask is not None:
+                submask_batch = submask[start:end].to(self.device, dtype=torch.float32)
 
             x1y1 = infos_batch[:, :2]
             size = infos_batch[:, 2]
@@ -268,7 +280,8 @@ class FaceAlignment:
                 x1y1,
                 size,
                 rot,
-                (H, W)
+                (H, W),
+                submask_batch if submask is not None else None,
             )
             composite = pasta * mask + original_batch * (~ mask)
             pasted.append(composite.to(device="cpu", dtype=torch.uint8))

@@ -68,21 +68,21 @@ def crop_with_centers_scales(frames, centers, scales, out_size):
     cropped = torch.nn.functional.grid_sample(frames, grid, mode='bilinear', align_corners=True)
     return cropped
 
-def paste_csr(cropped_frames, x1y1, sizes, rotations, original_shape):
+def paste_csr(cropped_frames, x1y1, sizes, rotations, original_shape, mask=None):
     """
     Pastes cropped & rotated frames back into the original frame space.
     
     Args:
         cropped_frames: (N, 3, out_size, out_size)
         x1y1: (N, 2) - top-left corner of crop in original image (x1, y1)
-        sizes: (N,) - width/height of the original square crop
+        sizes: (N,) - width and height of the original square crop
         rotations: (N,) - rotation in radians (same as crop)
         original_shape: (H, W) - size of the full image
-    
+        mask: None, (N, 1, out_size, out_size)
     Returns:
         tuple(
             pasted_frames: (N, 3, H, W) (pasted on black screen),
-            mask: equivalent mask
+            mask: corresponding mask
         )
     """
     N, C, out_size, _ = cropped_frames.shape
@@ -123,14 +123,15 @@ def paste_csr(cropped_frames, x1y1, sizes, rotations, original_shape):
     grid = grid * (out_size - 1)
     grid = (grid / (out_size - 1)) * 2 - 1  # normalize again for grid_sample
 
-    # Sample from cropped_frames to reconstruct original frame
     pasted = torch.nn.functional.grid_sample(
         cropped_frames, grid, mode='bilinear', padding_mode='border', align_corners=True
     )
     mask = torch.nn.functional.grid_sample(
-        cropped_frames, grid, mode='nearest', padding_mode='zeros', align_corners=True
+        mask if mask is not None else cropped_frames, grid, mode='nearest', padding_mode='zeros', align_corners=True
     )
     return pasted, mask.bool()
+
+
 
 def crop_csr(frames, centers, scales, rotations, out_size=512):
     """
